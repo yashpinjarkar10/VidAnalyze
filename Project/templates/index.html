@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Summarizer</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Video Summarizer</h1>
+            <button id="toggleHistory" class="history-btn">Show History</button>
+        </header>
+
+        <div class="main-content">
+            <div class="upload-section">
+                <form id="uploadForm" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <label for="video">Upload Video:</label>
+                        <input type="file" id="video" name="video" accept=".mp4,.mov,.avi" required>
+                    </div>
+
+                    <div class="video-preview" id="videoPreview" style="display: none;">
+                        <video id="videoPlayer" controls>
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+
+                    <button type="submit" class="submit-btn">Upload Video</button>
+                </form>
+
+                <form id="analysisForm" style="display: none;">
+                    <div class="form-group">
+                        <label for="query">Your Query:</label>
+                        <textarea id="query" name="query" placeholder="Ask about the video's content..." required></textarea>
+                    </div>
+
+                    <button type="submit" class="submit-btn">Analyze Video</button>
+                </form>
+            </div>
+
+            <div id="historyPanel" class="history-panel" style="display: none;">
+                <h2>Analysis History</h2>
+                <div id="historyContent" class="history-content"></div>
+                <button id="clearHistory" class="clear-btn">Clear History</button>
+            </div>
+        </div>
+
+        <div id="processingStatus" class="status-message" style="display: none;">
+            <div class="spinner"></div>
+            <p>Processing video...</p>
+        </div>
+
+        <div id="analysisStatus" class="status-message" style="display: none;">
+            <div class="spinner"></div>
+            <p>Analyzing video...</p>
+        </div>
+
+        <div id="result" class="result-section" style="display: none;">
+            <h2>Analysis Result</h2>
+            <div id="resultContent"></div>
+        </div>
+
+        <div id="error" class="error-message" style="display: none;"></div>
+    </div>
+
+    <script>
+        let currentTaskId = null;
+        let currentFileName = null;
+
+        // History management
+        function saveToHistory(analysis) {
+            const history = JSON.parse(localStorage.getItem('analysisHistory') || '[]');
+            history.unshift({
+                ...analysis,
+                filename: currentFileName
+            });
+            // Keep only last 50 entries
+            if (history.length > 50) history.length = 50;
+            localStorage.setItem('analysisHistory', JSON.stringify(history));
+            updateHistoryDisplay();
+        }
+
+        function updateHistoryDisplay() {
+            const history = JSON.parse(localStorage.getItem('analysisHistory') || '[]');
+            const historyContent = document.getElementById('historyContent');
+            historyContent.innerHTML = history.map(item => `
+                <div class="history-item">
+                    <div class="history-header">
+                        <strong>Video:</strong> ${item.filename}<br>
+                        <strong>Query:</strong> ${item.query}<br>
+                        <small>${new Date(item.timestamp).toLocaleString()}</small>
+                    </div>
+                    <div class="history-result">${item.result}</div>
+                </div>
+            `).join('');
+        }
+
+        // Event Listeners
+        document.getElementById('toggleHistory').addEventListener('click', function() {
+            const historyPanel = document.getElementById('historyPanel');
+            historyPanel.style.display = historyPanel.style.display === 'none' ? 'block' : 'none';
+            this.textContent = historyPanel.style.display === 'none' ? 'Show History' : 'Hide History';
+            updateHistoryDisplay();
+        });
+
+        document.getElementById('clearHistory').addEventListener('click', function() {
+            if (confirm('Are you sure you want to clear all history?')) {
+                localStorage.removeItem('analysisHistory');
+                updateHistoryDisplay();
+            }
+        });
+
+        document.getElementById('video').addEventListener('change', function(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const videoPreview = document.getElementById('videoPreview');
+                const videoPlayer = document.getElementById('videoPlayer');
+                videoPlayer.src = URL.createObjectURL(file);
+                videoPreview.style.display = 'block';
+            }
+        });
+
+        document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const formData = new FormData(this);
+            const processingStatus = document.getElementById('processingStatus');
+            const errorDiv = document.getElementById('error');
+
+            try {
+                processingStatus.style.display = 'block';
+                errorDiv.style.display = 'none';
+
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    currentTaskId = data.task_id;
+                    currentFileName = data.filename;
+                    document.getElementById('analysisForm').style.display = 'block';
+                    processingStatus.style.display = 'none';
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                errorDiv.textContent = `Upload error: ${error.message}`;
+                errorDiv.style.display = 'block';
+                processingStatus.style.display = 'none';
+            }
+        });
+
+        document.getElementById('analysisForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const query = document.getElementById('query').value;
+            const analysisStatus = document.getElementById('analysisStatus');
+            const resultSection = document.getElementById('result');
+            const resultContent = document.getElementById('resultContent');
+            const errorDiv = document.getElementById('error');
+
+            try {
+                analysisStatus.style.display = 'block';
+                resultSection.style.display = 'none';
+                errorDiv.style.display = 'none';
+
+                const formData = new FormData();
+                formData.append('query', query);
+
+                const response = await fetch(`/analyze/${currentTaskId}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    resultContent.textContent = data.analysis.result;
+                    resultSection.style.display = 'block';
+                    saveToHistory(data.analysis);
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                errorDiv.textContent = `Analysis error: ${error.message}`;
+                errorDiv.style.display = 'block';
+            } finally {
+                analysisStatus.style.display = 'none';
+            }
+        });
+
+        // Initialize history display
+        updateHistoryDisplay();
+    </script>
+</body>
+</html>
