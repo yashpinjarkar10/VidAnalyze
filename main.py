@@ -1,0 +1,147 @@
+from fastapi import FastAPI, File, UploadFile, Form, Request, BackgroundTasks
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from phi.agent import Agent
+from phi.model.google import Gemini
+from phi.tools.duckduckgo import DuckDuckGo
+import google.generativeai as genai
+from google.generativeai import upload_file, get_file
+import time
+from pathlib import Path
+import tempfile
+from dotenv import load_dotenv
+import os
+import logging
+import asyncio
+from datetime import datetime
+import uuid
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+API_KEY = os.getenv("GOOGLE_API_KEY")
+if not API_KEY:
+    raise ValueError("GOOGLE_API_KEY not found in environment variables")
+
+genai.configure(api_key=API_KEY)
+
+app = FastAPI(title="Video Summarizer")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+
+class VideoAnalyzer:
+    def __init__(self):
+        self.agent = self.initialize_agent()
+        self._processed_videos = {}
+
+    def initialize_agent(self) -> Agent:
+        return Agent(
+            name="Video Summarizer",
+            model=Gemini(id="gemini-2.0-flash-exp"),
+            tools=[DuckDuckGo()]
+        )
+
+    async def process_video(self, video_path: Path, task_id: str) -> str:
+        try:
+            processed_video = upload_file(str(video_path))
+
+            while processed_video.state.name == "PROCESSING":
+                await asyncio.sleep(1)
+                processed_video = get_file(processed_video.name)
+
+            if processed_video.state.name != "ACTIVE":
+                raise ValueError("Video processing failed")
+
+            self._processed_videos[task_id] = processed_video.name
+            return processed_video.name
+
+        except Exception as e:
+            logger.error(f"Video processing error: {e}")
+            raise
+
+    async def analyze_video(self, task_id: str, query: str) -> dict:
+        try:
+            processed_video_id = self._processed_videos.get(task_id)
+            if not processed_video_id:
+                raise ValueError("Video data not found")
+
+            processed_video = get_file(processed_video_id)
+            prompt = f"Analyze the video and answer: {query}"
+            response = self.agent.run(prompt, videos=[processed_video])
+
+            return {
+                "id": str(uuid.uuid4()),
+                "query": query,
+                "result": response.content,
+                "timestamp": datetime.utcnow().isoformat(),
+                "video_id": task_id
+            }
+
+        except Exception as e:
+            logger.error(f"Analysis error: {e}")
+            raise
+
+
+analyzer = VideoAnalyzer()
+
+
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.post("/upload")
+async def upload_video(
+        background_tasks: BackgroundTasks,
+        video: UploadFile = File(...)
+):
+    try:
+        task_id = str(uuid.uuid4())
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
+            content = await video.read()
+            temp_video.write(content)
+            video_path = Path(temp_video.name)
+
+        background_tasks.add_task(analyzer.process_video, video_path, task_id)
+
+        return JSONResponse({
+            "success": True,
+            "task_id": task_id,
+            "filename": video.filename
+        })
+    except Exception as e:
+        return JSONResponse({
+            "success": False,
+            "error": str(e)
+        })
+
+
+@app.post("/analyze/{task_id}")
+async def analyze_video_endpoint(
+        task_id: str,
+        query: str = Form(...)
+):
+    try:
+        result = await analyzer.analyze_video(task_id, query)
+        return JSONResponse({
+            "success": True,
+            "analysis": result
+        })
+    except Exception as e:
+        return JSONResponse({
+            "success": False,
+            "error": str(e)
+        })
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
